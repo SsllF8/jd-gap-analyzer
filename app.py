@@ -7,7 +7,10 @@ JD Gap Analyzer - 简历与JD深度差距分析工具
 import streamlit as st
 import json
 import re
+import io
 from openai import OpenAI
+import pdfplumber
+import docx
 
 # ── 页面配置 ──────────────────────────────────────────────
 st.set_page_config(
@@ -24,6 +27,17 @@ st.markdown("""
   .stTextArea textarea {
     font-size: 14px !important;
     min-height: 220px !important;
+  }
+  .summary-text {
+    font-size: 15px;
+    color: #1f2937;
+    line-height: 1.7;
+    margin-top: 12px;
+  }
+  .section-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #111827;
   }
   .card {
     background: white;
@@ -70,31 +84,102 @@ with st.sidebar:
     model_choice = st.selectbox("模型", ["deepseek-chat", "deepseek-reasoner"])
     st.caption("💡 API Key 仅在本次会话中使用，不会被存储")
 
+# ── 文件解析函数 ──────────────────────────────────────────
+def parse_pdf(file_bytes: bytes) -> str:
+    text_parts = []
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text_parts.append(t)
+    return "\n".join(text_parts)
+
+
+def parse_docx(file_bytes: bytes) -> str:
+    doc = docx.Document(io.BytesIO(file_bytes))
+    paragraphs = []
+    for para in doc.paragraphs:
+        if para.text.strip():
+            paragraphs.append(para.text)
+    # 尝试读取表格
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+            if row_text:
+                paragraphs.append(row_text)
+    return "\n".join(paragraphs)
+
+
+def parse_file(uploaded_file) -> str | None:
+    fname = uploaded_file.name.lower()
+    try:
+        if fname.endswith(".pdf"):
+            return parse_pdf(uploaded_file.read())
+        elif fname.endswith(".docx"):
+            return parse_docx(uploaded_file.read())
+        elif fname.endswith(".txt"):
+            return uploaded_file.read().decode("utf-8", errors="replace")
+        else:
+            return None
+    except Exception as e:
+        return None
+
+
 # ── 主输入区 ──────────────────────────────────────────────
 col1, col2 = st.columns(2, gap="large")
 
+# ── 简历输入区（支持文件上传 + 粘贴）─────────────────────
 with col1:
-    st.markdown("### 📄 粘贴你的简历")
+    st.markdown("### 📄 简历")
+    resume_file = st.file_uploader(
+        "上传简历（PDF/Word/TXT）",
+        type=["pdf", "docx", "txt"],
+        key="resume_upload",
+        help="支持 PDF、Word（.docx）、纯文本，自动提取内容"
+    )
+    if resume_file:
+        parsed = parse_file(resume_file)
+        if parsed:
+            st.session_state["resume_text"] = parsed
+            st.success(f"✅ 已解析：{resume_file.name}（{len(parsed)} 字）")
+        else:
+            st.error("文件解析失败，请尝试复制粘贴内容")
     resume_text = st.text_area(
-        label="简历内容（纯文本即可）",
-        height=320,
-        placeholder="将简历内容粘贴到这里...\n\n示例：\n工作经验\n- 2023-2025 某公司 后端工程师\n  负责用户服务模块开发，使用 Python/FastAPI...\n\n技能\nPython, React, MySQL, Docker...",
+        label="简历内容",
+        height=280,
+        key="resume_text",
+        placeholder="上传文件后内容自动填入此处，也可直接粘贴...\n\n快捷键：Ctrl+V 粘贴",
         label_visibility="collapsed"
     )
 
+# ── JD 输入区（支持文件上传 + 粘贴）──────────────────────
 with col2:
-    st.markdown("### 📋 粘贴目标 JD")
+    st.markdown("### 📋 目标 JD")
+    jd_file = st.file_uploader(
+        "上传 JD（PDF/Word/TXT）",
+        type=["pdf", "docx", "txt"],
+        key="jd_upload",
+        help="支持 PDF、Word（.docx）、纯文本"
+    )
+    if jd_file:
+        parsed = parse_file(jd_file)
+        if parsed:
+            st.session_state["jd_text"] = parsed
+            st.success(f"✅ 已解析：{jd_file.name}（{len(parsed)} 字）")
+        else:
+            st.error("文件解析失败，请尝试复制粘贴内容")
     jd_text = st.text_area(
-        label="职位描述（JD）",
-        height=320,
-        placeholder="将 JD 粘贴到这里...\n\n示例：\n任职要求\n1. 熟悉 React/Vue 前端框架\n2. 有 Node.js 后端开发经验\n3. 了解 Docker 容器化部署\n4. 有 AI 应用开发经验者优先",
+        label="JD内容",
+        height=280,
+        key="jd_text",
+        placeholder="上传文件后内容自动填入此处，也可直接粘贴...",
         label_visibility="collapsed"
     )
 
 # ── 示例数据 ──────────────────────────────────────────────
 with st.expander("📖 点击加载示例数据（快速体验）"):
     if st.button("加载示例", use_container_width=True):
-        st.session_state["demo_resume"] = """工作经验
+        st.session_state["resume_text"] = """工作经验
 2023.06 - 至今 | 某科技公司 | Python后端工程师
 • 负责用户中心、订单系统的 API 开发，使用 FastAPI + PostgreSQL
 • 设计并实现了基于 Redis 的缓存层，接口响应时间降低 40%
@@ -112,7 +197,7 @@ with st.expander("📖 点击加载示例数据（快速体验）"):
 工具：Docker, Git, Linux
 英语：CET-6（阅读无障碍）"""
 
-        st.session_state["demo_jd"] = """岗位要求（AI应用开发工程师）
+        st.session_state["jd_text"] = """岗位要求（AI应用开发工程师）
 1. 熟悉 Python，有扎实的工程开发能力
 2. 熟练使用 LangChain 或类似 LLM 框架进行 AI 应用开发
 3. 有 RAG（检索增强生成）系统的设计与实现经验
@@ -123,11 +208,7 @@ with st.expander("📖 点击加载示例数据（快速体验）"):
 
         st.rerun()
 
-# 加载示例数据
-if "demo_resume" in st.session_state:
-    resume_text = st.session_state.pop("demo_resume")
-if "demo_jd" in st.session_state:
-    jd_text = st.session_state.pop("demo_jd")
+# 加载示例数据（通过 session_state 自动同步到 text_area）
 
 st.divider()
 
@@ -212,6 +293,16 @@ def score_color(score: int) -> str:
     return "#ef4444"
 
 
+def _esc(text: str) -> str:
+    """将文本中的换行转为<br>，转义HTML特殊字符，防止被markdown解析"""
+    if not text:
+        return ""
+    text = str(text)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("\n", "<br>").replace("\r", "")
+    return text
+
+
 def status_tag(status: str) -> str:
     if status == "hit":
         return '<span class="tag-hit">✅ 覆盖</span>'
@@ -241,49 +332,49 @@ if analyze_btn:
     color = score_color(score)
     
     with c1:
-        st.markdown(f"""
+        st.html(f"""
         <div class="card" style="text-align:center">
           <div style="font-size:13px;color:#888;margin-bottom:4px">综合匹配度</div>
           <div class="score-circle" style="color:{color}">{score}</div>
           <div style="font-size:12px;color:#888">/ 100</div>
-        </div>""", unsafe_allow_html=True)
+        </div>""")
     
     with c2:
-        st.markdown(f"""
+        st.html(f"""
         <div class="card" style="text-align:center">
           <div style="font-size:13px;color:#888;margin-bottom:4px">已覆盖</div>
           <div style="font-size:48px;font-weight:800;color:#22c55e;padding:20px 0 8px">
             {result.get('hit_count', 0)}
           </div>
           <div style="font-size:12px;color:#888">条 JD 要求</div>
-        </div>""", unsafe_allow_html=True)
+        </div>""")
     
     with c3:
-        st.markdown(f"""
+        st.html(f"""
         <div class="card" style="text-align:center">
           <div style="font-size:13px;color:#888;margin-bottom:4px">覆盖较弱</div>
           <div style="font-size:48px;font-weight:800;color:#f59e0b;padding:20px 0 8px">
             {result.get('weak_count', 0)}
           </div>
           <div style="font-size:12px;color:#888">条 JD 要求</div>
-        </div>""", unsafe_allow_html=True)
+        </div>""")
     
     with c4:
-        st.markdown(f"""
+        st.html(f"""
         <div class="card" style="text-align:center">
           <div style="font-size:13px;color:#888;margin-bottom:4px">完全缺失</div>
           <div style="font-size:48px;font-weight:800;color:#ef4444;padding:20px 0 8px">
             {result.get('gap_count', 0)}
           </div>
           <div style="font-size:12px;color:#888">条 JD 要求</div>
-        </div>""", unsafe_allow_html=True)
+        </div>""")
 
     # 总结
-    st.markdown(f"""
+    st.html(f"""
     <div class="card">
-      <strong>📝 AI 总评</strong><br><br>
-      {result.get('summary', '')}
-    </div>""", unsafe_allow_html=True)
+      <span class="section-title">📝 AI 总评</span>
+      <div class="summary-text">{_esc(result.get('summary', ''))}</div>
+    </div>""")
 
     st.divider()
 
@@ -295,30 +386,48 @@ if analyze_btn:
         status = item.get("status", "gap")
         card_class = {"hit": "hit", "weak": "weak", "gap": "gap"}.get(status, "gap")
         
-        evidence_html = ""
-        if item.get("resume_evidence"):
-            evidence_html = f"""
-            <div style="font-size:13px;color:#555;margin-top:8px">
-              📌 <strong>简历依据：</strong>{item['resume_evidence']}
-            </div>"""
+        jd_req = _esc(item.get("jd_requirement", ""))
+        evidence = _esc(item.get("resume_evidence", ""))
+        suggestion = _esc(item.get("suggestion", ""))
         
-        suggestion_html = ""
-        if item.get("suggestion") and status != "hit":
-            suggestion_html = f"""
-            <div class="rewrite-box">
-              💡 <strong>改写建议：</strong><br>{item['suggestion']}
-            </div>"""
+        # 状态文字颜色
+        status_color = {"hit": "#16a34a", "weak": "#b45309", "gap": "#dc2626"}.get(status, "#666")
+        status_label = {"hit": "✅ 覆盖", "weak": "⚠️ 较弱", "gap": "❌ 缺失"}.get(status, "?")
+        status_icon = {"hit": "✅", "weak": "⚠️", "gap": "❌"}.get(status, "?")
         
-        st.markdown(f"""
+        st.html(f"""
         <div class="card {card_class}">
-          <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
-            <span style="color:#888;font-size:13px">#{i}</span>
-            {status_tag(status)}
-            <span style="font-weight:600;font-size:15px">{item.get('jd_requirement', '')}</span>
+          <!-- JD 要求 -->
+          <div style="margin-bottom:12px">
+            <div style="font-size:12px;color:#9ca3af;margin-bottom:4px">JD 第 {i} 条要求</div>
+            <div style="font-size:16px;font-weight:700;color:#111827;line-height:1.6">{jd_req}</div>
           </div>
-          {evidence_html}
-          {suggestion_html}
-        </div>""", unsafe_allow_html=True)
+
+          <!-- 覆盖状态 -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <span style="
+              font-size:13px;font-weight:700;color:{status_color};
+              background:{'#dcfce7' if status=='hit' else '#fef9c3' if status=='weak' else '#fee2e2'};
+              padding:4px 12px;border-radius:20px">
+              {status_icon}&nbsp;{status_label}
+            </span>
+            <span style="font-size:13px;color:#6b7280">
+              {"简历已覆盖该要求，无需修改" if status=='hit' else "简历有相关经历，建议强化描述" if status=='weak' else "简历完全缺失该要求，建议补充"}
+            </span>
+          </div>
+
+          {"<!-- 简历证据 -->" if evidence else ""}
+          {f'''<div style="background:#f9fafb;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+            <div style="font-size:13px;font-weight:700;color:#374151;margin-bottom:4px">📌 简历中的对应内容</div>
+            <div style="font-size:15px;color:#4b5563;line-height:1.6">{evidence}</div>
+          </div>''' if evidence else ""}
+
+          {"<!-- 改写建议 -->" if (suggestion and status != "hit") else ""}
+          {f'''<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px 16px">
+            <div style="font-size:13px;font-weight:700;color:#1d4ed8;margin-bottom:6px">💡 改写建议（可直接采用或微调）</div>
+            <div style="font-size:15px;color:#1e3a5f;line-height:1.8">{suggestion}</div>
+          </div>''' if (suggestion and status != "hit") else ""}
+        </div>""")
 
     st.divider()
 
@@ -329,19 +438,13 @@ if analyze_btn:
         st.markdown("### 💪 你的优势亮点")
         strengths = result.get("strengths", [])
         for s in strengths:
-            st.markdown(f"""
-            <div class="card hit" style="padding:12px 16px;margin:6px 0">
-              ✅ {s}
-            </div>""", unsafe_allow_html=True)
+            st.html(f"""<div class="card hit" style="padding:14px 18px;margin:6px 0;font-size:15px;color:#1f2937;line-height:1.6">✅ {_esc(s)}</div>""")
 
     with col_b:
         st.markdown("### ⚡ 优先行动清单")
         quick_wins = result.get("quick_wins", [])
         for j, qw in enumerate(quick_wins, 1):
-            st.markdown(f"""
-            <div class="card gap" style="padding:12px 16px;margin:6px 0">
-              <strong>#{j}</strong> {qw}
-            </div>""", unsafe_allow_html=True)
+            st.html(f"""<div class="card gap" style="padding:14px 18px;margin:6px 0;font-size:15px;color:#1f2937;line-height:1.6"><strong>#{j}</strong>&nbsp;&nbsp;{_esc(qw)}</div>""")
 
     st.divider()
     st.caption("🤖 由 DeepSeek AI 驱动 · JD Gap Analyzer MVP · 基于 SpeedyJob 改进方案")
