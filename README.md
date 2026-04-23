@@ -11,6 +11,8 @@
 
 ## 📸 效果预览
 
+![输入与上传界面](./screenshot-00.png)
+
 ![逐条分析效果](./screenshot-01.png)
 
 ![总览与行动清单](./screenshot-02.png)
